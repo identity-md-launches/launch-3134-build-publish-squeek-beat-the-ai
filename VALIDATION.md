@@ -2,6 +2,35 @@
 
 Checked on 2026-11-08 against the built static export. These are worker-run checks, not an independent certification or Genesis approval. No deployment or public repository URL is claimed before the IMD publishing handoff.
 
+## Revision: pending calls older than seven days
+
+Finding `dfbadd458610d9c97744e87c3c8668a30f6a297160e1694c9d42aa2145caa9b3` reproduced before the fix. The new test in `src/events.test.ts` supplied schema-valid safe settlements for #101 on November 8 and #1253 on November 16. The original loader returned only `[1253]` with `complete=true`, and its assertion failed because #101 was absent. These dates and outcomes are synthetic review fixtures, not real-world observations.
+
+Fixed at `src/api.ts:195`: pending live calls from the matching installation extend evidence retention through their oldest lock time. Cached overlap cannot end a scan while an older settled call still lacks evidence. Forty pages is now a per-poll budget with a continuation, rather than a permanent scan limit. Page checkpoints survive transient failures; documented HTTP 400/409 cursor invalidation starts a fresh scan. `src/useFeed.ts:27` receives saved entries from `src/App.tsx:94` through a ref, preserving the existing polling loops. Scoring order and the seven-day AI filter in `src/game.ts` are preserved.
+
+Actual revision checks:
+
+| Check | Result |
+| --- | --- |
+| `npm ci --cache .cache/npm --no-audit --no-fund` | Installed the existing lockfile; root manifest/lockfile unchanged |
+| `npm run typecheck` | Passed, no diagnostics |
+| `npm test` | **61 passed, 0 failed**, including 8 new evidence/backfill regressions |
+| `npm run build` | Passed; final export rebuilt after the last source change |
+| `npm run test:browser` with the supplied Playwright/Chromium paths | All Chromium flows passed, including the return scenario below; no uncaught JavaScript errors |
+| Pinned taste@1 command below | **16/16 passed**; no overflow, overlap or clipped text at 320/390/1440 |
+| Axe audits | Zero violations: 44 checks each on live/practice boards; 19 each on practice/recovered result dialogs |
+| WebKit | Runtime unavailable; Safari remains unverified |
+
+The browser regression in `test/browser.mjs:410` locks #101, reloads eight virtual days later and locks #1253 while both remain unresolved. A first page supplies #1253, cached recent rows and a record past the training cutoff; the needed #101 is behind an older cursor. An injected 409 error keeps both calls waiting and shows the feed error. After the virtual backoff, the restarted scan retrieves the old evidence, then resolves #101 for **30** and #1253 for **35** points, with streak **2**, **two live artworks**, **35 weekly points** and **65 all-time points**. Reloading does not duplicate points or reveal an old result again. The unit suite separately verifies 41-page resumption and transient network failure checkpoints.
+
+Screenshots inspected: `test/scratch/browser/live-mocked-390.png`, `return-pending-390.png`, `return-result-390.png`, and `test/scratch/taste/shots/390.png`. The primary controls fit the 390×844 screen; the recovered result shows +35 with +10 call, +15 bracket and +10 streak, without clipped text. All browser feed fixtures are isolated from production.
+
+The pinned Better Interface guide was applied to the changed states across all six domains: accessibility (native controls/dialog, visible error, keyboard/reduced-motion checks and zero axe violations); layout (390px result/first-screen inspection, automated 320/390/1440 checks); writing (existing explicit waiting/error copy, no fabricated result); typography (existing Outfit scale/weights, probe passed); colors (existing rendered pairs pass the probe); UI (pending, cursor error, recovered result, collection, score switching and reload). No visual source change was required. Existing limitations below still apply, including human screen-reader use, RTL/200% zoom, Safari and animation-panel replay. Live API retention and availability cannot be guaranteed; genuinely absent evidence remains waiting. The revision uses only the documented event endpoint/cursor, rechecked against the [official API reference](https://docs.squeekchain.com/developers/api/) on 2026-11-08; actual public gameplay was not observed anew in this revision.
+
+Revision integrity audit: **47 eligible files, about 1.41 MiB**, including **9 files / 657,909 bytes** in `dist/`, below the 8 MiB limit. Local HTML/CSS/module asset references resolve; the export is not ignored. The root package manifest, lockfile and ignore file are unchanged. No symlink, dependency/cache directory, source map or package archive is included. `.imd-responses.json` contains the exact finding ID and `fixed` verdict; the worker consumes that response separately.
+
+Complete for this revision’s scope. The following original-build record is preserved as historical evidence; its direct public-feed observations were not re-run for the revision.
+
 ## Results
 
 | Check | Actual result |

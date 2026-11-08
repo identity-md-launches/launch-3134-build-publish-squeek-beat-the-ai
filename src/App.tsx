@@ -89,9 +89,9 @@ const countdown = (ms: number) =>
           .padStart(2, "0")}`;
 
 export default function App() {
-  const feed = useFeed();
   const [now, setNow] = useState(Date.now());
   const [state, setState] = useState<GameState>(() => loadState().state);
+  const feed = useFeed(state.entries);
   const [storageOk, setStorageOk] = useState(() => loadState().available);
   const [mode, setMode] = useState<"live" | "practice">("live");
   const [view, setView] = useState<

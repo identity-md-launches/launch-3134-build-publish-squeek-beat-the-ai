@@ -93,6 +93,8 @@ Buttons and links have explicit names; icon-only controls have `aria-label`. Eve
 
 The live lock state waits for matching status, history and event installation IDs as well as freshness and closure guards. A feed transition keeps the action unavailable rather than presenting history from a different installation as the current game.
 
+The pending-call evidence backfill in `src/api.ts` and `src/useFeed.ts` now reaches saved live calls older than seven days. While a multi-poll scan is incomplete, the existing Professor loading state remains visible and the live action waits for history. A failed page uses the existing adjacent feed error; it never turns a pending call into a result. Confirmed recovered calls use the same result dialog, streak breakdown, scoreboard and art collection as current calls. The eight-day return and cursor-error recovery were checked at 390px; the visual tokens and layout above are preserved.
+
 Animations exist only under `prefers-reduced-motion: no-preference`. The wheel rotates continuously from the reported RPM, with a minimum 0.2-second period to prevent extreme speed. Running bounce is 0.24s, sleep breathing is 3s, result reveal is 0.5s, and control colour transitions are 120ms. Reduced motion disables those loops; a visible pause control additionally pauses scene animation. There are no autoplay sounds, flashes, page-load entrances or `transition: all` rules.
 
 ## Do’s and Don’ts

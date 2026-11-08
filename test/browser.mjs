@@ -164,7 +164,13 @@ async function mockFeed(context, control) {
       await route.abort("failed");
       return;
     }
+    if (control.cursorError && url.pathname === "/v1/events" && url.searchParams.has("cursor")) {
+      control.cursorError = false;
+      await route.fulfill({ status: 409, contentType: "application/json", body: '{"error":"cursor_invalidated"}' });
+      return;
+    }
     const data = mockedData(control.now, control.settled, control.stale);
+    if (control.transform) control.transform(data, url);
     if (control.schema && url.pathname === "/v1/status") {
       data.status.schemaVersion = 99;
     }
@@ -400,6 +406,119 @@ try {
     "confirmed resolution and duel",
     "Covering settlement reveals only after confirmation; player +30 vs friend 0; Duelist; no duplicate points after reload.",
   );
+
+  // Synthetic review regression: leave an unsettled call, return eight days later,
+  // and recover its evidence from an older cursor page after locking a new call.
+  const absence = 8 * 86_400_000;
+  const returnControl = {
+    now: base,
+    settled: false,
+    returned: false,
+    olderPages: 0,
+    requests: [],
+    transform(data, url) {
+      if (!this.returned) return;
+      const shift = (stamp) => new Date(Date.parse(stamp) + absence).toISOString();
+      const shiftRound = (r) => String(Number(r) + 1152);
+      const { status, history, events } = data;
+      status.builder.anchor.settledThroughRound = shiftRound(status.builder.anchor.settledThroughRound);
+      status.builder.anchor.confirmedAt = shift(status.builder.anchor.confirmedAt);
+      status.oracle.latestClosure.firstRound = shiftRound(status.oracle.latestClosure.firstRound);
+      status.oracle.latestClosure.lastRound = shiftRound(status.oracle.latestClosure.lastRound);
+      status.oracle.latestClosure.acceptedAt = shift(status.oracle.latestClosure.acceptedAt);
+      history.mining.nextRound.round = shiftRound(history.mining.nextRound.round);
+      history.mining.nextRound.startsAt = shift(history.mining.nextRound.startsAt);
+      history.mining.nextRound.endsAt = shift(history.mining.nextRound.endsAt);
+      for (const e of events.events) {
+        e.payload.previousSettledThroughRound = shiftRound(e.payload.previousSettledThroughRound);
+        e.payload.settledThroughRound = shiftRound(e.payload.settledThroughRound);
+        e.occurredAt = shift(e.occurredAt);
+        e.recordedAt = e.occurredAt;
+      }
+      if (!this.settled) return; // The old evidence is not yet supplied by this test feed.
+      if (url.searchParams.get("cursor") === "return-older") {
+        this.olderPages++;
+        const old = clone(events.events[0]);
+        old.id = "review-return-old-101";
+        old.source.transactionHash = `0x${"cd".repeat(32)}`;
+        old.payload.previousSettledThroughRound = "100";
+        old.payload.settledThroughRound = "101";
+        old.occurredAt = "2026-11-08T12:10:36.000Z";
+        old.recordedAt = old.occurredAt;
+        events.events = [old];
+        events.nextCursor = null;
+      } else {
+        const boundary = clone(events.events[0]);
+        boundary.id = "review-return-training-boundary";
+        boundary.source.transactionHash = `0x${"ef".repeat(32)}`;
+        boundary.payload.previousSettledThroughRound = "199";
+        boundary.payload.settledThroughRound = "200";
+        boundary.occurredAt = "2026-11-09T12:00:36.000Z";
+        boundary.recordedAt = boundary.occurredAt;
+        events.events.push(boundary);
+        events.nextCursor = "return-older";
+      }
+    },
+  };
+  const returnCtx = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    reducedMotion: "reduce",
+  });
+  await mockFeed(returnCtx, returnControl);
+  const returning = await returnCtx.newPage();
+  returning.on("pageerror", (e) => errors.push(e.message));
+  await returning.clock.install({ time: base });
+  await returning.goto(origin);
+  await returning.getByRole("button", { name: "Lock my prediction", exact: true }).waitFor();
+  await returning.getByRole("button", { name: "Sprint Some work" }).click();
+  await returning.getByRole("button", { name: "1–10", exact: true }).click();
+  await returning.getByRole("button", { name: "Lock my prediction", exact: true }).click();
+  await returning.getByRole("button", { name: "Dismiss achievement" }).click();
+  returnControl.returned = true;
+  returnControl.now = base + absence;
+  await returning.clock.setSystemTime(returnControl.now);
+  await returning.reload();
+  await returning.getByRole("button", { name: "Lock my prediction", exact: true }).waitFor();
+  assert.equal(await returning.getByRole("dialog").count(), 0);
+  await returning.getByRole("button", { name: "Sprint Some work" }).click();
+  await returning.getByRole("button", { name: "1–10", exact: true }).click();
+  await returning.getByRole("button", { name: "Lock my prediction", exact: true }).click();
+  await returning.waitForFunction(() => JSON.parse(localStorage.getItem("squeek.predictor.v1")).entries.length === 2);
+  const pendingSave = await returning.evaluate(() => JSON.parse(localStorage.getItem("squeek.predictor.v1")));
+  assert.deepEqual(pendingSave.entries.map((e) => e.round), [101, 1253]);
+  assert.ok(pendingSave.entries.every((e) => !e.result));
+  await returning.screenshot({ path: `${scratch}/return-pending-390.png` });
+  returnControl.now += 360_000;
+  returnControl.settled = true;
+  returnControl.cursorError = true;
+  await returning.clock.fastForward(360_000);
+  await returning.getByText(/Feed unavailable \(HTTP 409\)/).waitFor();
+  assert.equal(await returning.getByRole("dialog").count(), 0);
+  const afterInvalidation = await returning.evaluate(() => JSON.parse(localStorage.getItem("squeek.predictor.v1")));
+  assert.ok(afterInvalidation.entries.every((e) => !e.result));
+  returnControl.now += 120_000;
+  await returning.clock.fastForward(120_000);
+  await returning.getByRole("dialog", { name: "He chose to sprint." }).waitFor();
+  const recovered = await returning.evaluate(() => JSON.parse(localStorage.getItem("squeek.predictor.v1")));
+  assert.deepEqual(recovered.entries.map((e) => e.result?.player.total), [30, 35]);
+  assert.deepEqual(recovered.entries.map((e) => e.result?.player.streak), [1, 2]);
+  assert.equal(recovered.collection.filter((i) => i.mode === "live").length, 2);
+  assert.equal(returnControl.olderPages, 1);
+  await returning.screenshot({ path: `${scratch}/return-result-390.png` });
+  await audit(returning, "return-result");
+  await returning.getByRole("button", { name: "Close result" }).click();
+  assert.equal(await returning.locator(".score-numbers > div").first().locator("strong").textContent(), "35");
+  await returning.getByRole("button", { name: "All time", exact: true }).click();
+  assert.equal(await returning.locator(".score-numbers > div").first().locator("strong").textContent(), "65");
+  await returning.reload();
+  await returning.getByRole("button", { name: "All time", exact: true }).click();
+  assert.equal(await returning.locator(".score-numbers > div").first().locator("strong").textContent(), "65");
+  assert.equal(await returning.getByRole("dialog").count(), 0);
+  report(
+    "eight-day return recovers old and new results",
+    "390px: locked #101, returned eight days later, locked #1253; both waited for supplied evidence and a 409 cursor restart, then older backfill resolved +30/+35, streak 2, two artworks, weekly 35/all-time 65; reload did not duplicate points.",
+  );
+  await returnCtx.close();
 
   const staleControl = { now: base, stale: true, requests: [] };
   const staleCtx = await browser.newContext();

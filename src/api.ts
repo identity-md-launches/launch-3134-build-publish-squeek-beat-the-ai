@@ -4,7 +4,7 @@ import statusSchema from "./schemas/status.json";
 import historySchema from "./schemas/settlements.json";
 import eventSchema from "./schemas/events.json";
 import { mergeSettlements, WEEK_MS } from "./game";
-import type { History, Settlement, Status } from "./types";
+import type { Entry, History, Settlement, Status } from "./types";
 
 const ajv = new Ajv2020({ strict: false, allErrors: false });
 addFormats(ajv);
@@ -24,7 +24,11 @@ const validators = {
 export const API = "https://api.squeekchain.com";
 export class FeedError extends Error {
   retryAt: number;
-  constructor(message: string, retryAt = 0) {
+  constructor(
+    message: string,
+    retryAt = 0,
+    readonly status?: number,
+  ) {
     super(message);
     this.retryAt = retryAt;
   }
@@ -66,7 +70,11 @@ export async function readApi(
       );
     }
     if (!response.ok)
-      throw new FeedError(`Feed unavailable (HTTP ${response.status}).`);
+      throw new FeedError(
+        `Feed unavailable (HTTP ${response.status}).`,
+        0,
+        response.status,
+      );
     const data = await response.json();
     const valid: boolean = Boolean(validators[kind](data));
     if (!valid)
@@ -149,16 +157,31 @@ export async function fetchHistory(range: "24h" | "7d"): Promise<History> {
       data.mining?.status === "available" ? data.mining.nextRound : undefined,
   };
 }
+// A checkpoint lets bounded polls and transient failures resume an older backfill.
+export type EventScan = {
+  rows: Settlement[];
+  cursor: string;
+  installationId: string;
+  cutoff: number;
+};
 export async function fetchEvents(
   existing: Settlement[],
   installationId: string | null,
-  progress: (rows: Settlement[]) => void,
-): Promise<{ rows: Settlement[]; complete: boolean; installationId: string }> {
-  let cursor: string | null = null;
-  let rows: Settlement[] = [];
+  progress: (rows: Settlement[], continuation: EventScan | null) => void,
+  saved: Entry[] = [],
+  resume: EventScan | null = null,
+): Promise<{
+  rows: Settlement[];
+  complete: boolean;
+  installationId: string;
+  continuation: EventScan | null;
+}> {
+  let cursor: string | null = resume?.cursor ?? null;
+  let rows = mergeSettlements(existing, resume?.rows ?? []);
   const known = new Set(existing.map((s) => s.transactionHash));
-  const cutoff = Date.now() - WEEK_MS;
-  let feedInstallation = installationId;
+  let cutoff = Math.min(Date.now() - WEEK_MS, resume?.cutoff ?? Infinity);
+  let feedInstallation = resume?.installationId ?? installationId;
+  let continuation: EventScan | null = resume;
   for (let page = 0; page < 40; page++) {
     const data = await readApi(
       `/v1/events?category=protocol&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
@@ -169,6 +192,17 @@ export async function fetchEvents(
         "Feed installation changed. Reload to start on the new installation.",
       );
     feedInstallation = data.installationId;
+    const pending = saved.filter(
+      (e) =>
+        e.mode === "live" &&
+        !e.result &&
+        e.installationId === feedInstallation,
+    );
+    // Evidence must reach every pending lock, even after the AI's training window expires.
+    for (const entry of pending) {
+      const lockedAt = Date.parse(entry.lockedAt);
+      if (Number.isFinite(lockedAt)) cutoff = Math.min(cutoff, lockedAt);
+    }
     let overlap = false;
     for (const event of data.events) {
       if (event.type !== "system.settlement_completed") continue;
@@ -190,15 +224,45 @@ export async function fetchEvents(
     rows = mergeSettlements(existing, rows).filter(
       (s) => Date.parse(s.blockTimestamp) >= cutoff,
     );
-    progress(rows);
     const reachedPast = data.events.some(
       (e: any) => Date.parse(e.occurredAt) < cutoff,
     );
-    if (!data.nextCursor || reachedPast || overlap)
-      return { rows, complete: true, installationId: feedInstallation! };
+    const frontier = rows.at(-1)?.settledThroughRound ?? -1;
+    const pendingCovered = pending.every(
+      (e) =>
+        e.round > frontier ||
+        rows.some(
+          (s) =>
+            s.previousSettledThroughRound < e.round &&
+            s.settledThroughRound >= e.round &&
+            Date.parse(s.blockTimestamp) > Date.parse(e.lockedAt),
+        ),
+    );
+    // A known recent event proves incremental overlap, not coverage of an older saved call.
+    const complete =
+      !data.nextCursor || reachedPast || (overlap && pendingCovered);
+    continuation = complete
+      ? null
+      : {
+          rows,
+          cursor: data.nextCursor,
+          installationId: feedInstallation!,
+          cutoff,
+        };
+    progress(rows, continuation);
+    if (complete)
+      return {
+        rows,
+        complete: true,
+        installationId: feedInstallation!,
+        continuation,
+      };
     cursor = data.nextCursor;
   }
-  throw new FeedError(
-    "Seven-day history is incomplete. Try again when the feed catches up.",
-  );
+  return {
+    rows,
+    complete: false,
+    installationId: feedInstallation!,
+    continuation,
+  };
 }

@@ -1,6 +1,13 @@
-import { useEffect, useState } from "react";
-import { cooldownUntil, fetchEvents, fetchHistory, fetchStatus } from "./api";
-import type { Feed, Settlement } from "./types";
+import { useEffect, useRef, useState } from "react";
+import {
+  cooldownUntil,
+  FeedError,
+  fetchEvents,
+  fetchHistory,
+  fetchStatus,
+} from "./api";
+import type { EventScan } from "./api";
+import type { Entry, Feed, Settlement } from "./types";
 
 const initial: Feed = {
   status: null,
@@ -17,14 +24,17 @@ const initial: Feed = {
   historyComplete: false,
   loading: true,
 };
-export function useFeed() {
+export function useFeed(saved: Entry[]) {
   const [feed, setFeed] = useState<Feed>(initial);
+  const savedRef = useRef(saved);
+  savedRef.current = saved;
   useEffect(() => {
     let active = true;
     const timers: ReturnType<typeof setTimeout>[] = [];
     let rows: Settlement[] = [],
       installation: string | null = null,
       complete = false;
+    let continuation: EventScan | null = null;
     const loop = (work: () => Promise<void>, base: number) => {
       let failures = 0;
       async function run() {
@@ -87,9 +97,12 @@ export function useFeed() {
         const data = await fetchEvents(
           complete ? rows : [],
           installation,
-          (partial) => {
+          (partial, checkpoint) => {
+            continuation = checkpoint;
             if (active) setFeed((f) => ({ ...f, settlements: partial }));
           },
+          savedRef.current,
+          continuation,
         );
         rows = data.rows;
         installation = data.installationId;
@@ -104,8 +117,17 @@ export function useFeed() {
             eventsError: null,
           }));
       } catch (e) {
+        // Documented cursor invalidation requires a fresh scan, never a completed-history claim.
+        if (e instanceof FeedError && (e.status === 400 || e.status === 409)) {
+          continuation = null;
+          complete = false;
+        }
         if (active)
-          setFeed((f) => ({ ...f, eventsError: (e as Error).message }));
+          setFeed((f) => ({
+            ...f,
+            eventsError: (e as Error).message,
+            historyComplete: false,
+          }));
         throw e;
       }
     }, 60_000);
